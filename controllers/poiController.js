@@ -754,9 +754,321 @@ const deletePOI = async (req, res) => {
   }
 };
 
+/**
+ * Recherche des Points d'Intérêt (POI) en fonction d'un mot-clé.
+ * La recherche s'effectue sur les noms et descriptions dans toutes les localisations.
+ * * @param {Object} req - Objet de la requête Express.
+ * @param {Object} res - Objet de la réponse Express.
+ */
+const searchPOI = async (req, res) => {
+    try {
+
+        const keyword = req.query.keyword ? req.query.keyword.trim() : '';
+
+        if (!keyword) {
+            return res.status(400).json({ 
+                success: false, 
+                message: "Le mot-clé de recherche est requis." 
+            });
+        }
+
+        const searchPattern = `%${keyword.toLowerCase()}%`;
+
+        // 1. Trouver les IDs des Localisations qui correspondent au mot-clé
+        const matchingLocalizations = await POILocalization.findAll({
+            where: {
+                [Op.or]: [
+                    Sequelize.where(Sequelize.fn('lower', Sequelize.col('name')), { 
+                        [Op.like]: searchPattern 
+                    }),
+                    Sequelize.where(Sequelize.fn('lower', Sequelize.col('description')), { 
+                        [Op.like]: searchPattern 
+                    }),
+                    Sequelize.where(Sequelize.fn('lower', Sequelize.col('address')), { 
+                        [Op.like]: searchPattern 
+                    }),
+                ]
+            },
+            // Sélectionner uniquement l'ID pour optimiser la requête
+            attributes: ['id']
+        });
+
+        // Extraire tous les IDs de Localisation uniques trouvés
+        const localizationIds = matchingLocalizations.map(loc => loc.id);
+
+        // 2. Trouver les POI dont les IDs de Localisation correspondent
+        const pois = await POI.findAll({
+            where: {
+                isDeleted: false,
+                isActive: true, 
+                [Op.or]: [
+                    { ar: { [Op.in]: localizationIds } },
+                    { fr: { [Op.in]: localizationIds } },
+                    { en: { [Op.in]: localizationIds } },
+                ]
+            },
+
+            include: [
+                { model: POILocalization, as: 'frLocalization' },
+                { model: POILocalization, as: 'arLocalization' },
+                { model: POILocalization, as: 'enLocalization' },
+                { model: Category, as: 'categoryPOI' },
+                { model: POIFile, as: 'files' },
+                { model: City, as: 'city' }
+            ],
+            limit: 50
+        });
+
+        if (pois.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Aucun POI trouvé correspondant au mot-clé.",
+                data: []
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `${pois.length} POI(s) trouvé(s) pour le mot-clé: "${keyword}"`,
+            data: pois
+        });
+
+    } catch (error) {
+      console.error("❌ Erreur non capturée lors de searchPOI:", error);
+        console.error("Erreur lors de la recherche des POI:", error);
+        res.status(500).json({
+            success: false,
+            message: 'Erreur interne du serveur lors de la recherche',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
 
 
+/**
+ * Récupère tous les POI actifs et non supprimés pour une ville donnée.
+ */
+const getPOIsByCity = async (req, res) => {
+    try {
 
+        const { cityId } = req.params; 
+
+        if (!cityId) {
+            return res.status(400).json({
+                success: false,
+                message: "L'ID de la ville est requis."
+            });
+        }
+        
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(cityId)) {
+             return res.status(400).json({
+                success: false,
+                message: "L'ID de la ville doit être un UUID valide."
+            });
+        }
+
+        const pois = await POI.findAll({
+            where: {
+                cityId: cityId,
+                isDeleted: false,
+                isActive: true, 
+            },
+            include: [
+                { model: POILocalization, as: 'frLocalization' },
+                { model: POILocalization, as: 'arLocalization' },
+                { model: POILocalization, as: 'enLocalization' },
+                { model: Category, as: 'categoryPOI' },
+                { model: POIFile, as: 'files' },
+                { model: City, as: 'city' } 
+            ],
+            order: [['createdAt', 'ASC']] 
+        });
+
+        if (pois.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Aucun POI actif trouvé pour cette ville.",
+                data: []
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `${pois.length} POI(s) trouvés pour la ville.`,
+            data: pois
+        });
+
+    } catch (error) {
+        console.error("❌ Erreur lors de la récupération des POI par ville:", error);
+        res.status(500).json({
+            success: false,
+            message: 'Erreur interne du serveur lors du filtrage par ville',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+/**
+ * Récupère tous les POI actifs et non supprimés pour une catégorie donnée.
+ */
+const getPOIsByCategory = async (req, res) => {
+    try {
+
+        const { categoryId } = req.params; 
+
+        if (!categoryId) {
+            return res.status(400).json({
+                success: false,
+                message: "L'ID de la catégorie est requis."
+            });
+        }
+        
+        // Validation basique de l'UUID
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(categoryId)) {
+             return res.status(400).json({
+                success: false,
+                message: "L'ID de la catégorie doit être un UUID valide."
+            });
+        }
+
+        const pois = await POI.findAll({
+            where: {
+                category: categoryId, 
+                isDeleted: false,
+                isActive: true, 
+            },
+            include: [
+                { model: POILocalization, as: 'frLocalization' },
+                { model: POILocalization, as: 'arLocalization' },
+                { model: POILocalization, as: 'enLocalization' },
+                { model: Category, as: 'categoryPOI' },
+                { model: POIFile, as: 'files' },
+                { model: City, as: 'city' } 
+            ],
+            order: [['createdAt', 'ASC']]
+        });
+
+        if (pois.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Aucun POI actif trouvé pour cette catégorie.",
+                data: []
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `${pois.length} POI(s) trouvés pour la catégorie.`,
+            data: pois
+        });
+
+    } catch (error) {
+        console.error("❌ Erreur lors de la récupération des POI par catégorie:", error);
+        res.status(500).json({
+            success: false,
+            message: 'Erreur interne du serveur lors du filtrage par catégorie',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+/**
+ * Récupère les POI dans un rayon donné autour d'un point (latitude, longitude).
+ * Utilise la formule d'Haversine pour le calcul de distance géospatiale.
+ *
+ * @param {Object} req - Objet de la requête Express (attend lat, lng, radius en query).
+ * @param {Object} res - Objet de la réponse Express.
+ */
+const getPOIsNearby = async (req, res) => {
+    try {
+
+        const { lat, lng, radius } = req.query; 
+
+        if (!lat || !lng || !radius) {
+            return res.status(400).json({
+                success: false,
+                message: "Les paramètres 'lat', 'lng' et 'radius' sont requis."
+            });
+        }
+
+        // Conversion en nombres (et validation simple)
+        const centerLat = parseFloat(lat);
+        const centerLng = parseFloat(lng);
+        const searchRadiusKm = parseFloat(radius);
+
+        if (isNaN(centerLat) || isNaN(centerLng) || isNaN(searchRadiusKm) || searchRadiusKm <= 0) {
+             return res.status(400).json({
+                success: false,
+                message: "Les paramètres géographiques doivent être des nombres valides."
+            });
+        }
+        
+        // Rayon de la Terre en Kilomètres
+        const EARTH_RADIUS_KM = 6371;
+
+        const latitudeColumn = `JSON_EXTRACT(POI.coordinates, '$.latitude')`;
+        const longitudeColumn = `JSON_EXTRACT(POI.coordinates, '$.longitude')`;
+
+        const distanceCalculation = Sequelize.literal(`
+            (
+                ${EARTH_RADIUS_KM} * acos(
+            cos(radians(${centerLat})) * cos(radians(${latitudeColumn})) * cos(radians(${longitudeColumn}) - radians(${centerLng}))
+            + sin(radians(${centerLat})) * sin(radians(${latitudeColumn}))
+        )
+            )
+        `);
+
+        const pois = await POI.findAll({
+            attributes: {
+                include: [[distanceCalculation, 'distance_km']] 
+            },
+            where: {
+                isDeleted: false,
+                isActive: true,
+                // Filtrer les POI dont la distance calculée est inférieure ou égale au rayon de recherche
+                [Op.and]: [
+                    Sequelize.where(distanceCalculation, { [Op.lte]: searchRadiusKm }),
+                    Sequelize.literal(`JSON_EXTRACT(POI.coordinates, '$.latitude') IS NOT NULL`)
+                ]
+            },
+            include: [
+                { model: POILocalization, as: 'frLocalization' },
+                { model: POILocalization, as: 'arLocalization' },
+                { model: POILocalization, as: 'enLocalization' },
+                { model: Category, as: 'categoryPOI' },
+                { model: POIFile, as: 'files' },
+                { model: City, as: 'city' } 
+            ],
+            // Trier par la colonne calculée 'distance_km'
+            order: [[Sequelize.literal('distance_km'), 'ASC']], 
+            limit: 50 
+        });
+
+        if (pois.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Aucun POI trouvé dans ce rayon.",
+                data: []
+            });
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `${pois.length} POI(s) trouvés dans un rayon de ${searchRadiusKm} km.`,
+            data: pois
+        });
+
+    } catch (error) {
+        console.error("❌ Erreur lors de la recherche des POI à proximité:", error);
+        res.status(500).json({
+            success: false,
+            message: 'Erreur interne du serveur lors de la recherche à proximité',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
 
 
 module.exports = {
@@ -765,5 +1077,9 @@ module.exports = {
   findAllPOIs,
   findOnePOI,
   updatePOI,
-  deletePOI
+  deletePOI,
+  searchPOI,
+  getPOIsByCity,
+  getPOIsByCategory,
+  getPOIsNearby,
 };

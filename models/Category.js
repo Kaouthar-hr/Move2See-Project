@@ -13,15 +13,24 @@ const sequelize = db.getSequelize();
         ar: { type: DataTypes.JSON, allowNull: true },
         en: { type: DataTypes.JSON, allowNull: true },
         fr: { type: DataTypes.JSON, allowNull: true },
-        is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
+        isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
          is_deleted: {
                 type: DataTypes.BOOLEAN,
                 defaultValue: false,
             },
+
+        createdAt: {
+        type: DataTypes.DATE,
+        allowNull: true, 
+        },
+    updatedAt: {
+        type: DataTypes.DATE,
+        allowNull: true,
+    }
     }, {
         tableName: 'categories',
         timestamps: true,
-        //underscored: true,
+        underscored: true,
     });
 
 

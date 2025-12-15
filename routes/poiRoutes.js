@@ -7,6 +7,10 @@ const {
   findOnePOI,
   updatePOI,
   deletePOI,
+  searchPOI,
+  getPOIsByCity,
+  getPOIsByCategory,
+  getPOIsNearby,
     // getPOIsForParcoursLibre,
     // getTravelTime
 } = require('../controllers/poiController.js');
@@ -150,6 +154,26 @@ poiRouter.post('/upload/virtual-tour', uploadVirtualTour.single('virtualTour'), 
 // Routes principales des POI
 poiRouter.get('/', findAllPOIs);
 
+poiRouter.get(
+    '/search', 
+    searchPOI 
+)
+
+poiRouter.get(
+    '/nearby',
+    getPOIsNearby
+);
+
+poiRouter.get(
+    '/by-city/:cityId', 
+    getPOIsByCity 
+);
+
+poiRouter.get(
+    '/by-category/:categoryId', 
+     getPOIsByCategory 
+);
+
 // Route pour récupérer un POI par ID
 poiRouter.get('/:id', findOnePOI);
 
@@ -216,6 +240,8 @@ poiRouter.put(
 
 // Route pour supprimer un POI (suppression logique)
 poiRouter.delete('/:id', deletePOI);
+
+
 
 
 module.exports = { poiRouter };

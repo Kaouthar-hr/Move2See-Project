@@ -75,8 +75,8 @@ exports.createCategory = async (req, res) => {
       ...sanitizedLocalizations,
       icon: req.file ? req.file.path : null, // URL Cloudinary
       iconPublicId: req.file ? req.file.filename : null, // Public ID Cloudinary
-      isActive: req.body.isActive === 'true' || req.body.isActive === true,
-      isDeleted: false
+      is_active: req.body.is_active === 'true' || req.body.is_active === true,
+      is_deleted: false
     });
 
     res.status(201).json({ status: 'success', data: category });
@@ -93,14 +93,14 @@ exports.getAllCategories = async (req, res) => {
       page, 
       limit, 
       search = '', 
-      isActive,
+      is_active,
       sortBy = 'id'
     } = req.query;
 
     // If no pagination params, return all categories (for dropdowns, etc.)
     if (!page && !limit) {
       const categories = await Category.findAll({
-        where: { isDeleted: false },
+        where: { is_deleted: false },
         include: [
           {
             model: POI,
@@ -120,8 +120,8 @@ exports.getAllCategories = async (req, res) => {
           'Category.fr', 
           'Category.ar', 
           'Category.en', 
-          'Category.isActive', 
-          'Category.isDeleted', 
+          'Category.is_active', 
+          'Category.is_deleted', 
           'Category.created_at', 
           'Category.updated_at'
         ],
@@ -135,10 +135,10 @@ exports.getAllCategories = async (req, res) => {
     const { Op } = require('sequelize');
 
     // Build where clause
-    const where = { isDeleted: false };
+    const where = { is_deleted: false };
     
     // Add filters
-    if (isActive !== undefined) where.isActive = isActive === 'true';
+    if (is_active !== undefined) where.is_active = is_active === 'true';
 
     // Add search filter - search in JSON fields
     if (search) {
@@ -206,8 +206,8 @@ exports.getAllCategories = async (req, res) => {
         'Category.fr', 
         'Category.ar', 
         'Category.en', 
-        'Category.isActive', 
-        'Category.isDeleted', 
+        'Category.is_active', 
+        'Category.is_deleted', 
         'Category.created_at', 
         'Category.updated_at'
       ],
@@ -241,7 +241,7 @@ exports.getCategoryById = async (req, res) => {
     const { id } = req.params;
 
     const category = await Category.findOne({
-      where: { id, isDeleted: false },
+      where: { id, is_deleted: false },
       include: [
         { model: POI, as: 'pois', where: { isDeleted: false }, required: false }
       ]
@@ -266,7 +266,7 @@ exports.updateCategory = async (req, res) => {
     const { id } = req.params;
     const { localizations } = req.body;
 
-    const category = await Category.findOne({ where: { id, isDeleted: false } });
+    const category = await Category.findOne({ where: { id, is_deleted: false } });
     if (!category) {
       return res.status(404).json({ status: 'fail', message: 'Catégorie non trouvée' });
     }
@@ -306,7 +306,7 @@ exports.updateCategory = async (req, res) => {
 
     const updateData = {
       ...sanitizedLocalizations,
-      isActive: req.body.isActive === 'true' || req.body.isActive === true
+      is_active: req.body.is_active === 'true' || req.body.is_active === true
     };
 
     // Si une nouvelle icône est uploadée
@@ -334,7 +334,7 @@ exports.deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const category = await Category.findOne({ where: { id, isDeleted: false } });
+    const category = await Category.findOne({ where: { id, is_deleted: false } });
     if (!category) {
       return res.status(404).json({ status: 'fail', message: 'Catégorie non trouvée' });
     }
@@ -345,7 +345,7 @@ exports.deleteCategory = async (req, res) => {
       await deleteFile(category.iconPublicId);
     }
 
-    await category.update({ isDeleted: true });
+    await category.update({ is_deleted: true });
 
     res.json({ status: 'success', message: 'Catégorie supprimée avec succès (logiquement)' });
   } catch (error) {
