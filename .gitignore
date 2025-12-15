@@ -1,0 +1,11 @@
+# Ignorer les fichiers d'environnement
+.env
+.env.local
+.env.development
+.env.production
+
+# Ignorer node_modules
+node_modules/
+
+# Ignorer fichiers temporaires
+.DS_Store
