@@ -1,41 +1,73 @@
 const { Op, Sequelize } = require('sequelize');
-const { Circuit, POI, CircuitPOIs, Agency, POILocalization, Category, City, POIFile } = require('../models'); 
+const { Circuit, POI, CircuitPOIs, Agency, POILocalization, Category, City, POIFile, UserAgency } = require('../models'); 
 
 /**
  * [C] Créer un nouveau Circuit
 */
 exports.createCircuit = async (req, res) => {
-
     const transaction = await Circuit.sequelize.transaction();
     
     try {
         const data = req.body;
         const initialPois = data.pois || []; 
+        const userId = req.user.userId;
+        const userRole = req.user.role;
 
+        // 1. Validation des champs obligatoires
         if (!data.title || !data.agencyId || !data.price) {
             await transaction.rollback();
             return res.status(400).json({ 
                 status: 'fail', 
-                message: 'Le titre, l\'ID de l\'agence et le prix sont requis pour créer un circuit.' 
-            });
-        }
-        
-        const invalidPois = initialPois.filter(p => !p.poiId || typeof p.order !== 'number');
-        if (invalidPois.length > 0) {
-            await transaction.rollback();
-             return res.status(400).json({ 
-                status: 'fail', 
-                message: 'Chaque POI initial doit avoir un poiId (UUID) et un order (nombre).' 
+                message: 'Le titre, l\'ID de l\'agence et le prix sont requis.' 
             });
         }
 
-        // 2. Création du Circuit principal
+        // 2. Vérification de l'existence de l'agence, son statut et la propriété
+        const agencyQuery = {
+            where: { 
+                id: data.agencyId,
+                status: 'active', 
+                is_deleted: false 
+            },
+            transaction
+        };
+
+        // Si l'utilisateur n'est pas Admin, on vérifie s'il appartient à cette agence
+        if (userRole !== 'Admin') {
+            agencyQuery.include = [{
+                model: UserAgency,
+                as: 'userAgencies', 
+                where: { user_id: userId } 
+            }];
+        }
+
+        const targetAgency = await Agency.findOne(agencyQuery);
+
+        if (!targetAgency) {
+            await transaction.rollback();
+            return res.status(403).json({ 
+                status: 'fail', 
+                message: "Accès refusé. L'agence est inactive, supprimée, ou vous n'avez pas les droits sur celle-ci." 
+            });
+        }
+        
+        // 3. Validation des POIs (Points d'intérêt)
+        const invalidPois = initialPois.filter(p => !p.poiId || typeof p.order !== 'number');
+        if (invalidPois.length > 0) {
+            await transaction.rollback();
+            return res.status(400).json({ 
+                status: 'fail', 
+                message: 'Chaque POI doit avoir un poiId valide et un order numérique.' 
+            });
+        }
+
+        // 4. Création du Circuit principal
         const circuitDataToCreate = { ...data };
         delete circuitDataToCreate.pois; 
 
         const newCircuit = await Circuit.create(circuitDataToCreate, { transaction });
         
-        // 3. Gestion des POI initiaux (Association)
+        // 5. Création des relations Circuit-POI
         if (initialPois.length > 0) {
             const relations = initialPois.map(item => ({
                 circuitId: newCircuit.id,
@@ -46,42 +78,43 @@ exports.createCircuit = async (req, res) => {
             await CircuitPOIs.bulkCreate(relations, { transaction });
         }
         
-          // 4. Validation et Réponse Finale
+        // 6. Validation de la transaction
         await transaction.commit();
 
-        
+        // 7. Récupération du résultat final pour la réponse
         const createdCircuitWithPois = await Circuit.findByPk(newCircuit.id, {
             include: [{ 
                 model: POI, 
                 as: 'pois',
                 where: { isDeleted: false }, 
-                through: { attributes: ['order'] },
-                order: [[{ model: CircuitPOIs, as: 'circuitPOIs' }, 'order', 'ASC']]
+                required: false,
+                through: { attributes: ['order'] }
             }]
         });
 
-      
-
-        res.status(201).json({ 
+        return res.status(201).json({ 
             status: 'success', 
-            message: 'Circuit créé avec succès, y compris les POI associés.',
+            message: 'Circuit créé avec succès.',
             data: createdCircuitWithPois 
         });
 
     } catch (error) {
-        // En cas d'erreur (même une erreur de clé étrangère ou de validation Sequelize), on annule tout
-        await transaction.rollback(); 
+        if (transaction) await transaction.rollback(); 
         
-        console.error("❌ Erreur createCircuit (transaction annulée):", error.message);
+        console.error("❌ Erreur createCircuit:", error.message);
         
         let userMessage = 'Erreur serveur lors de la création du circuit.';
-        if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = 'Erreur: L\'ID d\'agence, ou un des ID de POI, ou un autre ID de clé étrangère est invalide.';
-        } else if (error.name === 'SequelizeValidationError') {
-             userMessage = 'Erreur de validation des données : ' + error.errors.map(e => e.message).join(', ');
-        }
         
-        res.status(500).json({ 
+        // Gestion des erreurs spécifiques de Sequelize
+        if (error.name === 'SequelizeForeignKeyConstraintError') {
+             userMessage = "Erreur d'intégrité : L'ID d'agence ou de POI fourni est invalide.";
+        } else if (error.name === 'SequelizeValidationError') {
+             userMessage = 'Erreur de validation : ' + error.errors.map(e => e.message).join(', ');
+        } else if (error.message.includes('alias')) {
+             userMessage = "Erreur de configuration du serveur : Alias de relation incorrect.";
+        }
+
+        return res.status(500).json({ 
             status: 'fail', 
             message: userMessage,
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -98,7 +131,14 @@ exports.getCircuits = async (req, res) => {
         const circuits = await Circuit.findAll({
             where: { isDeleted: false },
             include: [
-                { model: Agency, as: 'agency' },
+                { 
+                    model: Agency,
+                    as: 'agency' ,
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false  
+                }
+                },
                 { 
                     model: POI, 
                     as: 'pois', 
@@ -132,9 +172,7 @@ exports.getCircuits = async (req, res) => {
     }
 };
 
-/**
- * [R] Récupérer un Circuit par ID
- */
+
 /**
  * [R] Récupérer un Circuit par ID avec ses POI ordonnés
  */
@@ -151,7 +189,11 @@ exports.getCircuitById = async (req, res) => {
                 // 1. Inclusion de l'Agence
                 { 
                     model: Agency, 
-                    as: 'agency' 
+                    as: 'agency' ,
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false  
+        }
                 },
                 // 2. Inclusion des POIs avec leurs détails et localisations
                 { 
@@ -209,45 +251,73 @@ exports.getCircuitById = async (req, res) => {
 exports.updateCircuit = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
-    const initialPois = data.pois; 
+    const initialPois = data.pois;
+    const userId = req.user.userId;
+    const userRole = req.user.role;
 
     const transaction = await Circuit.sequelize.transaction();
 
     try {
-        
-        // On exclut 'pois' du corps pour la mise à jour du modèle Circuit principal
+        // 1. VÉRIFICATION DE SÉCURITÉ ET PROPRIÉTÉ
+        // On cherche le circuit, son agence (active) et si l'utilisateur y est lié
+        const existingCircuitConditions = {
+            where: { id: id, isDeleted: false },
+            include: [
+                {
+                    model: Agency,
+                    as: 'agency',
+                    where: { 
+                        status: 'active', 
+                        is_deleted: false 
+                    },
+                    // Si l'utilisateur n'est pas Admin, on force la vérification de propriété
+                    include: userRole !== 'Admin' ? [{
+                        model: UserAgency,
+                        as: 'userAgencies', 
+                        where: { user_id: userId }
+                    }] : []
+                }
+            ],
+            transaction
+        };
+
+        const existingCircuit = await Circuit.findOne(existingCircuitConditions);
+
+        if (!existingCircuit) {
+            await transaction.rollback();
+            return res.status(403).json({ 
+                status: 'fail',
+                message: "Modification impossible : circuit inexistant, agence inactive ou vous n'avez pas les droits nécessaires." 
+            });
+        }
+
+        // 2. Préparation des données (on exclut 'pois' de la mise à jour directe du modèle Circuit)
         const circuitDataToUpdate = { ...data };
         delete circuitDataToUpdate.pois; 
+        delete circuitDataToUpdate.agencyId; // Sécurité : on ne change pas l'agence d'un circuit existant
 
-        // 2. Mise à jour du Circuit principal
-        const [updatedRows] = await Circuit.update(circuitDataToUpdate, {
+        // 3. Mise à jour du Circuit principal
+        await Circuit.update(circuitDataToUpdate, {
             where: { id: id, isDeleted: false },
             transaction 
         });
 
-        if (updatedRows === 0) {
-            await transaction.rollback();
-            return res.status(404).json({ 
-                status: 'fail',
-                message: 'Circuit non trouvé ou non modifiable' 
-            });
-        }
-
-        // 3. Gestion des POI associés (si le champ 'pois' est présent)
+        // 4. Gestion des POI associés (si le champ 'pois' est fourni)
         if (initialPois !== undefined) {
             if (!Array.isArray(initialPois)) {
                 await transaction.rollback();
                 return res.status(400).json({
-                     status: 'fail',
-                     message: 'Le champ "pois" doit être un tableau.' 
-                    });
+                    status: 'fail',
+                    message: 'Le champ "pois" doit être un tableau.' 
+                });
             }
 
-            // A. Supprimer toutes les anciennes associations pour ce circuit
+            // A. Supprimer les anciennes associations
             await CircuitPOIs.destroy({ where: { circuitId: id }, transaction });
 
-            // B. Créer les nouvelles associations avec le nouvel ordre
+            // B. Créer les nouvelles associations
             if (initialPois.length > 0) {
+                // Validation rapide de la structure des données reçues
                 const relations = initialPois.map(item => ({
                     circuitId: id,
                     poiId: item.poiId,
@@ -267,16 +337,21 @@ exports.updateCircuit = async (req, res) => {
             }
         }
         
-        // 4. Finalisation et Récupération des données mises à jour
+        // 5. Validation de la transaction
         await transaction.commit();
 
+        // 6. Récupération du circuit mis à jour pour la réponse
         const updatedCircuit = await Circuit.findByPk(id, {
             include: [
-                { model: Agency, as: 'agency' },
+                { 
+                    model: Agency,
+                    as: 'agency',
+                    attributes: ['id', 'name', 'status']
+                },
                 { 
                     model: POI, 
                     as: 'pois', 
-                    through: { model: CircuitPOIs, attributes: ['order'] },
+                    through: { attributes: ['order'] },
                     where: { isDeleted: false },
                     required: false 
                 }
@@ -293,21 +368,23 @@ exports.updateCircuit = async (req, res) => {
         });
 
     } catch (error) {
-
-        await transaction.rollback(); 
+        if (transaction) await transaction.rollback(); 
         
-        console.error("❌ Erreur updateCircuit (transaction annulée):", error.message);
+        console.error("❌ Erreur updateCircuit :", error.message);
         
         let userMessage = 'Erreur serveur lors de la mise à jour du circuit.';
         if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = 'Erreur de clé étrangère : Un ID de POI ou d\'agence est invalide.';
+             userMessage = "Erreur d'intégrité : L'un des POI fournis n'existe pas dans la base de données.";
         } else if (error.name === 'SequelizeValidationError') {
-             userMessage = 'Erreur de validation des données : ' + error.errors.map(e => e.message).join(', ');
+             userMessage = 'Erreur de validation : ' + error.errors.map(e => e.message).join(', ');
+        } else if (error.message.includes('alias')) {
+             userMessage = "Erreur de configuration : l'alias des relations est incorrect.";
         }
 
-        res.status(500).json({ 
+        return res.status(500).json({ 
             status: 'fail', 
-            message: userMessage
+            message: userMessage,
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
@@ -317,68 +394,96 @@ exports.updateCircuit = async (req, res) => {
  */
 exports.deleteCircuit = async (req, res) => {
     const { id } = req.params;
+    const userId = req.user.userId;
+    const userRole = req.user.role;
     
     try {
+        // 1. Recherche du circuit avec vérification d'agence et de propriété
+        const circuitQuery = {
+            where: { id: id },
+            include: [{
+                model: Agency,
+                as: 'agency',
+                where: { 
+                    status: 'active', 
+                    is_deleted: false 
+                },
+                // Si l'utilisateur n'est pas Admin, on vérifie s'il possède cette agence
+                include: userRole !== 'Admin' ? [{
+                    model: UserAgency,
+                    as: 'userAgencies', 
+                    where: { user_id: userId }
+                }] : []
+            }]
+        };
 
-        const circuit = await Circuit.findByPk(id);
+        const circuit = await Circuit.findOne(circuitQuery);
 
+        // Si le circuit n'existe pas ou si l'utilisateur n'a pas les droits
         if (!circuit) {
             return res.status(404).json({ 
                 status: 'fail', 
-                message: `Circuit avec l'ID ${id} non trouvé.` 
+                message: "Impossible de supprimer. Circuit non trouvé, agence inactive ou droits insuffisants." 
             });
         }
         
+        // 2. Vérification si déjà supprimé
         if (circuit.isDeleted) {
-             return res.status(410).json({ 
+            return res.status(410).json({ 
                 status: 'fail', 
-                message: 'Le circuit est déjà marqué comme supprimé.' 
+                message: 'Ce circuit est déjà marqué comme supprimé.' 
             });
         }
         
-        // 2.  Vérification de Contrainte (Essentiel pour l'intégrité)
-        // DÉCOMMENTER CE BLOC LORSQUE VOUS AUREZ IMPLÉMENTÉ LE MODÈLE BOOKING
+        // 3. Vérification de Contrainte (Futur modèle Booking)
         /*
         const activeBookingsCount = await Booking.count({
             where: {
                 circuitId: id,
-                status: ['pending', 'confirmed', 'paid'] // Statuts qui empêchent la suppression
+                status: ['pending', 'confirmed', 'paid']
             }
         });
 
         if (activeBookingsCount > 0) {
-            return res.status(409).json({ // 409 Conflict
+            return res.status(409).json({
                 status: 'fail',
-                message: `Impossible de supprimer le circuit. Il a ${activeBookingsCount} réservation(s) active(s) en cours.`
+                message: `Impossible de supprimer : ${activeBookingsCount} réservation(s) active(s) en cours.`
             });
         }
         */
 
-        // 3. Effectuer la Suppression Logique
-        const [updated] = await Circuit.update({ 
+        // 4. Effectuer la Suppression Logique
+        const [updatedRows] = await Circuit.update({ 
             isDeleted: true 
         }, {
             where: { id: id }
         });
         
-        // 4. Réponse
-        if (updated) {
+        // 5. Réponse
+        if (updatedRows > 0) {
             return res.status(200).json({ 
                 status: 'success', 
-                message: `Le circuit ID ${id} est déjà marqué comme supprimé.` 
+                message: `Le circuit a été supprimé avec succès.` 
             });
         }
 
-        res.status(404).json({ 
+        return res.status(400).json({ 
             status: 'fail',
-            message: 'Échec de la suppression logique.' 
+            message: 'La mise à jour de suppression a échoué.' 
         });
 
     } catch (error) {
-        console.error("❌ Erreur deleteCircuit:", error);
-        res.status(500).json({ 
+        console.error("❌ Erreur deleteCircuit:", error.message);
+        
+        let userMessage = 'Erreur serveur lors de la suppression du circuit.';
+        if (error.message.includes('alias')) {
+            userMessage = "Erreur de configuration : l'alias des relations est incorrect.";
+        }
+
+        return res.status(500).json({ 
             status: 'fail',
-            message: 'Erreur serveur lors de la suppression du circuit.' 
+            message: userMessage,
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
@@ -391,34 +496,53 @@ exports.deleteCircuit = async (req, res) => {
  * - Gère les conflits d'ordre en décalant les POI existants.
  */
 exports.addPOIToCircuit = async (req, res) => {
-
     const { circuitId, poiId, order } = req.body;
+    const userId = req.user.userId;
+    const userRole = req.user.role;
     
     const newOrder = parseInt(order);
 
+    // 1. Validation des entrées
     if (!circuitId || !poiId || isNaN(newOrder) || newOrder < 1) {
         return res.status(400).json({ 
             status: 'fail', 
-            message: 'Les IDs du circuit, du POI et un ordre de visite valide (>= 1) sont requis.' 
+            message: 'Les IDs du circuit, du POI et un ordre valide (>= 1) sont requis.' 
         });
     }
 
     const transaction = await Circuit.sequelize.transaction();
     
     try {
-        // 1.  Vérifier l'existence du Circuit et du POI
+        // 2. VÉRIFICATION D'EXISTENCE, STATUT ET PROPRIÉTÉ
+        const circuitConditions = {
+            where: { id: circuitId, isDeleted: false },
+            include: [{
+                model: Agency,
+                as: 'agency',
+                where: { status: 'active', is_deleted: false },
+                // Vérification de propriété pour les non-admins
+                include: userRole !== 'Admin' ? [{
+                    model: UserAgency,
+                    as: 'userAgencies',
+                    where: { user_id: userId }
+                }] : []
+            }],
+            transaction
+        };
+
         const [circuit, poi] = await Promise.all([
-            Circuit.findByPk(circuitId, { transaction, attributes: ['id'] }),
+            Circuit.findOne(circuitConditions),
             POI.findByPk(poiId, { transaction, attributes: ['id', 'isDeleted'] })
         ]);
 
         if (!circuit) {
             await transaction.rollback();
-            return res.status(404).json({ 
+            return res.status(403).json({ 
                 status: 'fail',
-                message: 'Circuit non trouvé.' 
+                message: "Accès refusé ou circuit introuvable (l'agence doit être active)." 
             });
         }
+
         if (!poi || poi.isDeleted) {
             await transaction.rollback();
             return res.status(404).json({ 
@@ -427,7 +551,7 @@ exports.addPOIToCircuit = async (req, res) => {
             });
         }
         
-        // 2.  Vérifier si la relation existe déjà 
+        // 3. VÉRIFIER SI LA RELATION EXISTE DÉJÀ 
         const existingRelation = await CircuitPOIs.findOne({
             where: { circuitId, poiId },
             transaction
@@ -437,12 +561,12 @@ exports.addPOIToCircuit = async (req, res) => {
             await transaction.rollback();
             return res.status(409).json({ 
                 status: 'fail', 
-                message: 'Ce POI est déjà associé à ce circuit. Utilisez la mise à jour pour changer son ordre.' 
+                message: 'Ce POI est déjà associé à ce circuit.' 
             });
         }
         
-        // 3. Gérer le Conflit d'Ordre (Décalage des POI existants)
-        // Tous les POI ayant un ordre >= au nouvel ordre sont décalés d'une place.
+        // 4. GÉRER LE CONFLIT D'ORDRE (Décalage atomique)
+        // Décale tous les POI ayant un ordre >= au nouvel ordre
         await CircuitPOIs.increment('order', {
             by: 1,
             where: {
@@ -452,32 +576,34 @@ exports.addPOIToCircuit = async (req, res) => {
             transaction
         });
 
-        // 4. Créer la nouvelle relation
+        // 5. CRÉER LA NOUVELLE RELATION
         const newRelation = await CircuitPOIs.create({ 
             circuitId,
             poiId,
             order: newOrder 
         }, { transaction });
 
-        // 5. Finalisation
+        // 6. FINALISATION
         await transaction.commit();
 
-        res.status(201).json({ 
+        return res.status(201).json({ 
             status: 'success', 
-            message: 'POI ajouté au circuit avec succès et l\'ordre a été ajusté.',
+            message: 'POI ajouté et ordre ajusté avec succès.',
             data: newRelation 
         });
         
     } catch (error) {
-        await transaction.rollback();
-        console.error("❌ Erreur addPOIToCircuit:", error);
+        if (transaction) await transaction.rollback();
+        console.error("❌ Erreur addPOIToCircuit:", error.message);
         
-        let userMessage = 'Erreur serveur lors de l\'ajout du POI au circuit.';
+        let userMessage = "Erreur serveur lors de l'ajout du POI.";
         if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = 'Erreur de clé étrangère : L\'ID du circuit ou du POI est invalide.';
+             userMessage = "L'ID du circuit ou du POI est invalide.";
+        } else if (error.message.includes('alias')) {
+             userMessage = "Erreur de configuration des relations (alias).";
         }
         
-        res.status(500).json({ status: 'fail', message: userMessage });
+        return res.status(500).json({ status: 'fail', message: userMessage });
     }
 };
 
@@ -488,7 +614,10 @@ exports.addPOIToCircuit = async (req, res) => {
  */
 exports.removePOIFromCircuit = async (req, res) => {
     const { circuitId, poiId } = req.body;
+    const userId = req.user.userId;
+    const userRole = req.user.role;
     
+    // 1. Validation des entrées
     if (!circuitId || !poiId) {
         return res.status(400).json({ 
             status: 'fail', 
@@ -499,10 +628,37 @@ exports.removePOIFromCircuit = async (req, res) => {
     const transaction = await Circuit.sequelize.transaction();
     
     try {
-        // 1. Trouver l'association existante et son ordre
+        // 2. VÉRIFICATION DE SÉCURITÉ ET PROPRIÉTÉ
+        // On vérifie que le circuit existe et appartient à l'agence de l'utilisateur
+        const circuitConditions = {
+            where: { id: circuitId, isDeleted: false },
+            include: [{
+                model: Agency,
+                as: 'agency',
+                where: { status: 'active', is_deleted: false },
+                include: userRole !== 'Admin' ? [{
+                    model: UserAgency,
+                    as: 'userAgencies',
+                    where: { user_id: userId }
+                }] : []
+            }],
+            transaction
+        };
+
+        const circuit = await Circuit.findOne(circuitConditions);
+
+        if (!circuit) {
+            await transaction.rollback();
+            return res.status(403).json({ 
+                status: 'fail',
+                message: "Accès refusé ou circuit introuvable (l'agence doit être active)." 
+            });
+        }
+
+        // 3. TROUVER L'ASSOCIATION EXISTANTE
         const existingRelation = await CircuitPOIs.findOne({
             where: { circuitId, poiId },
-            attributes: ['order'], // On a besoin de l'ordre pour le décalage
+            attributes: ['order'],
             transaction
         });
 
@@ -510,20 +666,20 @@ exports.removePOIFromCircuit = async (req, res) => {
             await transaction.rollback();
             return res.status(404).json({ 
                 status: 'fail',
-                message: 'Association Circuit-POI non trouvée.' 
+                message: "Ce POI n'est pas associé à ce circuit." 
             });
         }
         
         const removedOrder = existingRelation.order;
 
-        // 2. Supprimer la relation
+        // 4. SUPPRIMER LA RELATION
         await CircuitPOIs.destroy({
             where: { circuitId, poiId },
             transaction
         });
 
-        // 3. Décaler les POI suivants pour combler le trou
-        // Tous les POI avec un ordre > à l'ordre supprimé sont décalés de -1.
+        // 5. RÉAJUSTER L'ORDRE (Combler le trou)
+        // Tous les POI ayant un ordre > à celui supprimé descendent de 1 (decrement)
         await CircuitPOIs.decrement('order', {
             by: 1,
             where: {
@@ -533,24 +689,24 @@ exports.removePOIFromCircuit = async (req, res) => {
             transaction
         });
 
-        // 4. Finalisation
+        // 6. FINALISATION
         await transaction.commit();
 
-        res.status(200).json({ 
+        return res.status(200).json({ 
             status: 'success', 
             message: 'POI retiré du circuit et ordre des POI suivants ajusté avec succès.' 
         });
         
     } catch (error) {
-        await transaction.rollback();
-        console.error("❌ Erreur removePOIFromCircuit:", error);
+        if (transaction) await transaction.rollback();
+        console.error("❌ Erreur removePOIFromCircuit:", error.message);
         
         let userMessage = 'Erreur serveur lors du retrait du POI du circuit.';
-        if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = 'Erreur de clé étrangère : L\'ID du circuit ou du POI est invalide.';
+        if (error.message.includes('alias')) {
+            userMessage = "Erreur de configuration : l'alias des relations est incorrect.";
         }
         
-        res.status(500).json({ status: 'fail', message: userMessage });
+        return res.status(500).json({ status: 'fail', message: userMessage });
     }
 };
 
@@ -561,65 +717,82 @@ exports.removePOIFromCircuit = async (req, res) => {
  */
 exports.updateCircuitPOIOrder = async (req, res) => {
     const { circuitId } = req.params;
-    const { poiIdsOrdered } = req.body; // Array of { poiId, order }
+    const { poiIdsOrdered } = req.body; // Tableau de { poiId, order }
+    const userId = req.user.userId;
+    const userRole = req.user.role;
 
+    // 1. Validation de base des entrées
     if (!Array.isArray(poiIdsOrdered) || poiIdsOrdered.length === 0) {
         return res.status(400).json({ 
             status: 'fail',
-            message: 'Liste ordonnée de POI invalide ou vide.' 
+            message: 'Une liste ordonnée de POI est requise (tableau non vide).' 
         });
     }
     
-    // Démarrer une transaction
     const transaction = await Circuit.sequelize.transaction();
 
     try {
-        // 1.  Vérifier l'existence du Circuit
-        const circuit = await Circuit.findByPk(circuitId,
-            { transaction, attributes: ['id'] }
-        );
+        // 2. VÉRIFICATION DE SÉCURITÉ ET PROPRIÉTÉ
+        // On vérifie l'existence du circuit et l'appartenance à l'agence de l'utilisateur
+        const circuitConditions = {
+            where: { id: circuitId, isDeleted: false },
+            include: [{
+                model: Agency,
+                as: 'agency',
+                where: { status: 'active', is_deleted: false },
+                include: userRole !== 'Admin' ? [{
+                    model: UserAgency,
+                    as: 'userAgencies', 
+                    where: { user_id: userId }
+                }] : []
+            }],
+            transaction
+        };
+
+        const circuit = await Circuit.findOne(circuitConditions);
+
         if (!circuit) {
             await transaction.rollback();
-            return res.status(404).json({ 
+            return res.status(403).json({ 
                 status: 'fail',
-                message: 'Circuit non trouvé.' 
+                message: "Accès refusé ou circuit introuvable (l'agence doit être active)." 
             });
         }
 
-        // 2. Supprimer toutes les anciennes associations pour ce circuit
-        await CircuitPOIs.destroy({ where: { circuitId }, transaction }); 
-
-        // 3. Préparer les nouvelles associations et valider les données
+        // 3. PRÉPARATION ET VALIDATION DES DONNÉES
         const relations = poiIdsOrdered.map(item => ({
             circuitId,
             poiId: item.poiId,
-            order: item.order
+            order: parseInt(item.order)
         }));
         
-        // Validation simple : S'assurer que tous les éléments ont un ID et un ordre valide
-        const invalidPois = relations.filter(r => !r.poiId || typeof r.order !== 'number' || r.order < 1);
+        const invalidPois = relations.filter(r => !r.poiId || isNaN(r.order) || r.order < 1);
         if (invalidPois.length > 0) {
             await transaction.rollback();
             return res.status(400).json({ 
                 status: 'fail', 
-                message: 'Chaque POI doit avoir un poiId (UUID) et un order (nombre positif).' 
+                message: 'Chaque POI doit avoir un poiId valide et un order (nombre positif).' 
             });
         }
-        
-        // 4. Créer les nouvelles associations avec le nouvel ordre
+
+        // 4. RÉORGANISATION ATOMIQUE
+        // A. Supprimer toutes les anciennes associations pour ce circuit
+        await CircuitPOIs.destroy({ where: { circuitId }, transaction }); 
+
+        // B. Recréer les associations avec le nouvel ordre
         await CircuitPOIs.bulkCreate(relations, { transaction });
 
-        // 5. Finalisation
+        // 5. FINALISATION DE LA TRANSACTION
         await transaction.commit();
         
-        // 6. Renvoyer le circuit mis à jour 
+        // 6. RÉCUPÉRATION DU CIRCUIT MIS À JOUR POUR LA RÉPONSE
         const updatedCircuit = await Circuit.findByPk(circuitId, {
             include: [
-                { model: Agency, as: 'agency' },
+                { model: Agency, as: 'agency', attributes: ['id', 'name'] },
                 { 
                     model: POI, 
                     as: 'pois', 
-                    through: { model: CircuitPOIs, attributes: ['order'] },
+                    through: { attributes: ['order'] },
                     where: { isDeleted: false },
                     required: false 
                 }
@@ -629,23 +802,24 @@ exports.updateCircuitPOIOrder = async (req, res) => {
             ]
         });
 
-
-        res.status(200).json({ 
+        return res.status(200).json({ 
             status: 'success', 
-            message: 'Ordre des POI mis à jour avec succès.',
+            message: 'L\'ordre des POI a été mis à jour avec succès.',
             data: updatedCircuit
         });
 
     } catch (error) {
-        await transaction.rollback();
-        console.error("❌ Erreur updateCircuitPOIOrder:", error);
+        if (transaction) await transaction.rollback();
+        console.error("❌ Erreur updateCircuitPOIOrder:", error.message);
         
-        let userMessage = 'Erreur serveur lors de la mise à jour de l\'ordre des POI.';
+        let userMessage = "Erreur serveur lors de la réorganisation des POI.";
         if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = 'Erreur de clé étrangère : L\'un des IDs de POI fournis est invalide.';
+             userMessage = "L'un des IDs de POI fournis n'existe pas dans la base de données.";
+        } else if (error.message.includes('alias')) {
+             userMessage = "Erreur de configuration : l'alias des relations est incorrect.";
         }
         
-        res.status(500).json({ status: 'fail', message: userMessage });
+        return res.status(500).json({ status: 'fail', message: userMessage });
     }
 };
 
@@ -656,8 +830,21 @@ exports.getCircuitPOIs = async (req, res) => {
     try {
         const { circuitId } = req.params;
         
-        const circuit = await Circuit.findByPk(circuitId, {
+        const circuit = await Circuit.findOne({
+            where: { 
+                id: circuitId, 
+                isDeleted: false 
+            },
             include: [
+                {
+                    model: Agency,
+                    as: 'agency',
+                    where: { 
+                        status: 'active', 
+                        is_deleted: false 
+                    },
+                    attributes: ['id', 'name', 'status'] 
+                },
                 { 
                     model: POI, 
                     as: 'pois', 
@@ -674,26 +861,32 @@ exports.getCircuitPOIs = async (req, res) => {
                     required: false
                 }
             ],
-            // 3. Trier les résultats
             order: [
-                ['createdAt', 'DESC'], 
                 [{ model: POI, as: 'pois' }, CircuitPOIs, 'order', 'ASC'] 
             ]
         });
 
+        // 2. Si le circuit n'est pas trouvé OU si l'agence est inactive (le where dans l'include annulera le résultat)
         if (!circuit) {
             return res.status(404).json({ 
                 status: 'fail',
-                message: 'Circuit non trouvé' 
+                message: "Circuit non trouvé ou l'agence associée est inactive." 
             });
         }
 
-        // Renvoyer uniquement les POI (qui sont déjà triés par la requête)
-        res.status(200).json({ status: 'success', data: circuit.pois });
+        // 3. Renvoyer les POI
+        res.status(200).json({ 
+            status: 'success', 
+            results: circuit.pois ? circuit.pois.length : 0,
+            data: circuit.pois 
+        });
 
     } catch (error) {
-        console.error("❌ Erreur getCircuitPOIs:", error);
-        res.status(500).json({ status: 'fail', message: 'Erreur serveur' });
+        console.error("❌ Erreur getCircuitPOIs:", error.message);
+        res.status(500).json({ 
+            status: 'fail', 
+            message: 'Erreur serveur lors de la récupération des POI du circuit.' 
+        });
     }
 };
 
@@ -721,7 +914,14 @@ exports.getCircuitsByAgency = async (req, res) => {
             where: { agencyId: agencyId, isDeleted: false },
             include: [
                 // 1. Inclusion de l'Agence
-                { model: Agency, as: 'agency' },
+                { 
+                    model: Agency,
+                    as: 'agency' ,
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false
+                    }
+                },
                 
                 // 2. Inclusion complète des POI ordonnés
                 { 
@@ -788,7 +988,10 @@ exports.getCircuitsByPrice = async (req, res) => {
                 { 
                     model: Agency, 
                     as: 'agency',
-                    required: false 
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false  
+                },
                 },
                 { 
                     model: POI, 
@@ -862,7 +1065,15 @@ exports.getCircuitsBySeats = async (req, res) => {
                 isDeleted: false
             },
             include: [
-                { model: Agency, as: 'agency', required: false },
+                { 
+                    model: Agency,
+                    as: 'agency' ,
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false   
+                    }
+
+                 },
                 { 
                     model: POI, 
                     as: 'pois', 
@@ -916,7 +1127,14 @@ exports.getCircuitsByDeparture = async (req, res) => {
                 isDeleted: false 
             },
             include: [
-                { model: Agency, as: 'agency', required: false },
+                { 
+                    model: Agency,
+                    as: 'agency',
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false  
+                },
+                },
                 { 
                     model: POI, 
                     as: 'pois', 
@@ -960,7 +1178,14 @@ exports.getCircuitsByDestination = async (req, res) => {
                 isDeleted: false 
             },
             include: [
-                { model: Agency, as: 'agency', required: false },
+                { 
+                    model: Agency,
+                    as: 'agency',
+                    where: { 
+                    status: 'active', 
+                    is_deleted: false  
+                },
+                },
                 { 
                     model: POI, 
                     as: 'pois', 
@@ -1018,7 +1243,14 @@ exports.searchCircuits = async (req, res) => {
                 ]
             },
             include: [
-                { model: Agency, as: 'agency', required: false },
+                { 
+                    model: Agency,
+                    as: 'agency',
+                    where: {    
+                    status: 'active', 
+                    is_deleted: false
+                    }
+                    },
                 { 
                     model: POI, 
                     as: 'pois', 

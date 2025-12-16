@@ -15,8 +15,10 @@ const { POIFile } = require("./POIFile");
 const { POILocalization } = require("./POILocalization");
 const { City } = require("./City");
 const { Category } = require("./Category");
-// const { Route } = require("./Route");
-// const { VisitedTrace } = require("./VisitedTrace");
+const { Route } = require("./Route");
+const { VisitedTrace } = require("./visitedTrace");
+
+
 
 // ------------------ AGENCY <-> AGENCYFILES ------------------
 Agency.hasMany(AgencyFiles, {
@@ -243,6 +245,22 @@ POI.belongsToMany(Circuit, {
     as: 'circuits'
 });
 
+// Route <-> User
+Route.belongsTo(User, { foreignKey: 'userId', as: 'creator' });
+User.hasMany(Route, { foreignKey: 'userId' });
+
+// Route <-> Circuit
+Route.belongsTo(Circuit, { foreignKey: 'circuitId', as: 'circuit' });
+Circuit.hasMany(Route, { foreignKey: 'circuitId' });
+
+// Route <-> AgencyVehicle
+Route.belongsTo(AgencyVehicle, { foreignKey: 'vehicleId', as: 'vehicle' });
+
+// visitedTrace <-> Route & POI
+VisitedTrace.belongsTo(Route, { foreignKey: 'routeId' });
+VisitedTrace.belongsTo(POI, { foreignKey: 'poiId', as: 'poi' });
+Route.hasMany(VisitedTrace, { foreignKey: 'routeId', as: 'traces' });
+
 module.exports = {
     User,
     Agency,
@@ -261,6 +279,6 @@ module.exports = {
     City,
     Category,
     POILocalization,
-    // Route,
-    // VisitedTrace
+    Route,
+    VisitedTrace,
 };

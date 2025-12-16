@@ -167,6 +167,7 @@ exports.createAgency = async (req, res) => {
         });
     }
 };
+
 exports.getAgency = async (req, res) => {
     const agency_id = req.params.agencyId;
     const userId = req.user ? req.user.userId : null;
