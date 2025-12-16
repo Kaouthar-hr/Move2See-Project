@@ -94,6 +94,7 @@ const serviceRoutes = require('./routes/serviceRoutes');
 const {poiRouter} = require('./routes/poiRoutes');
 const categoryRoutes = require("./routes/categoryRoutes.js");
 const CityRoute = require("./routes/cityRoutes.js");
+const circuitRouter = require('./routes/circuitRoutes');
 
 
 // Enregistrer les routes avec le préfixe /api
@@ -104,6 +105,7 @@ app.use('/api/services', serviceRoutes);
 app.use('/api/pois',poiRouter);
 app.use('/api/categorys', categoryRoutes);
 app.use('/api/city', CityRoute);
+app.use('/api/circuits', circuitRouter);
 
 // Route de test pour vérifier que le serveur fonctionne
 app.get('/api/health', (req, res) => {

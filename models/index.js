@@ -153,10 +153,10 @@ POI.belongsTo(Category, {
 
       
         
-        POI.hasMany(CircuitPOIs, {
-            foreignKey: 'poiId',
-            as: 'circuitPOIs'
-        });
+POI.hasMany(CircuitPOIs, {
+    foreignKey: 'poiId',
+    as: 'circuitPOIs'
+});
 
 Category.hasMany(POI, {
   foreignKey: 'category',
@@ -225,6 +225,22 @@ POILocalization.hasMany(POI, {
     sourceKey: "id",
     onDelete: 'SET NULL',
     onUpdate: 'CASCADE'
+});
+
+//  CIRCUIT <-> POI via CIRCUITPOIs (Many-to-Many) 
+
+Circuit.belongsToMany(POI, {
+    through: CircuitPOIs, 
+    foreignKey: 'circuitId', 
+    otherKey: 'poiId',
+    as: 'pois' 
+});
+
+POI.belongsToMany(Circuit, {
+    through: CircuitPOIs,
+    foreignKey: 'poiId',
+    otherKey: 'circuitId',
+    as: 'circuits'
 });
 
 module.exports = {

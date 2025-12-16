@@ -30,10 +30,11 @@ const sequelize = db.getSequelize();
             allowNull: false
         },
         departureCity: {
-            type: DataTypes.STRING 
+            type: DataTypes.UUID ,
+            allowNull: false
         },
         destinationCity: {
-            type: DataTypes.STRING 
+            type: DataTypes.UUID 
         },
         createdAt: {
             type: DataTypes.DATE,
@@ -44,6 +45,11 @@ const sequelize = db.getSequelize();
             type: DataTypes.DATE,
             allowNull: false,
             defaultValue: DataTypes.NOW
+        },
+        isDeleted: {
+            type: DataTypes.BOOLEAN,
+            allowNull: false,
+            defaultValue: false
         }
     }, {
         tableName: 'circuits',
