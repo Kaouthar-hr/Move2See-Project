@@ -18,13 +18,21 @@ const VisitedTrace = sequelize.define(
         },
         poiId: {
             type: DataTypes.UUID,
-            allowNull: false,
+            allowNull: true,
             field: 'poi_id'
         },
         order: {
             type: DataTypes.INTEGER,
-            allowNull: false,
-        }
+            allowNull: true,
+        },
+        lat: {
+        type: DataTypes.DECIMAL(10, 8),
+        allowNull: true
+    },
+    lng: {
+        type: DataTypes.DECIMAL(11, 8),
+        allowNull: true
+    },
     },
     {
         tableName: "visited_traces",

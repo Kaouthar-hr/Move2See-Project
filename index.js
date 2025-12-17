@@ -96,6 +96,7 @@ const categoryRoutes = require("./routes/categoryRoutes.js");
 const CityRoute = require("./routes/cityRoutes.js");
 const circuitRouter = require('./routes/circuitRoutes');
 const routeRouter = require('./routes/routeRoutes');
+const visitedTraceRoutes = require('./routes/visitedTraceRoutes');
 
 
 
@@ -109,6 +110,7 @@ app.use('/api/categorys', categoryRoutes);
 app.use('/api/city', CityRoute);
 app.use('/api/circuits', circuitRouter);
 app.use('/api/routes', routeRouter);
+app.use('/api/traces', visitedTraceRoutes);
 
 // Route de test pour vérifier que le serveur fonctionne
 app.get('/api/health', (req, res) => {

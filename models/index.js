@@ -17,6 +17,8 @@ const { City } = require("./City");
 const { Category } = require("./Category");
 const { Route } = require("./Route");
 const { VisitedTrace } = require("./visitedTrace");
+const db = require("../config/db"); 
+const sequelize = db.getSequelize();
 
 
 
@@ -281,4 +283,5 @@ module.exports = {
     POILocalization,
     Route,
     VisitedTrace,
+    sequelize
 };
