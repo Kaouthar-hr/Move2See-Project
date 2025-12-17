@@ -11,6 +11,12 @@ const Licence = sequelize.define(
             defaultValue: DataTypes.UUIDV4,
             allowNull: false,
         },
+        // Correspond au "Numéro d'immatriculation de l'entreprise"
+        registration_number: {
+            type: DataTypes.STRING,
+            allowNull: true,
+            unique: true, // Optionnel : pour éviter les doublons d'agences
+        },
         file_url: {
             type: DataTypes.STRING,
             allowNull: false,

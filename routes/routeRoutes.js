@@ -9,6 +9,8 @@ router.post('/create', authenticateToken, routeController.createRoute);
 
 router.get('/', authenticateToken, routeController.getRoutes);
 
+router.get('/search', authenticateToken, routeController.searchRoutes);
+
 //assignDriver
 router.patch(
     '/assignDriver',

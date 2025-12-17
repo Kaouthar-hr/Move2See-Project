@@ -253,7 +253,7 @@ User.hasMany(Route, { foreignKey: 'userId' });
 
 // Route <-> Circuit
 Route.belongsTo(Circuit, { foreignKey: 'circuitId', as: 'circuit' });
-Circuit.hasMany(Route, { foreignKey: 'circuitId' });
+Circuit.hasMany(Route, { foreignKey: 'circuitId', as: 'routes' });
 
 // Route <-> AgencyVehicle
 Route.belongsTo(AgencyVehicle, { foreignKey: 'vehicleId', as: 'vehicle' });

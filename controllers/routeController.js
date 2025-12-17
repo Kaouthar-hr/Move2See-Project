@@ -1,5 +1,5 @@
-const { Route, Circuit, AgencyVehicle, VisitedTrace, POI, UserActivity, Activity, UserAgency, Agency, User, POILocalization, POIFile } = require("../models");
-const { Op } = require("sequelize");
+const { Route, Circuit, AgencyVehicle, VisitedTrace, POI, UserActivity, Activity, UserAgency, Agency, User, POILocalization, POIFile , AgencyFiles} = require("../models");
+const { Op, fn, col , where} = require("sequelize");
 const crypto = require('crypto');
 
 exports.createRoute = async (req, res) => {
@@ -135,53 +135,59 @@ exports.createRoute = async (req, res) => {
         });
     }
 };
+
+
 exports.getRoutes = async (req, res) => {
     try {
         const { status } = req.query;
         const userId = req.user.userId;
         const userRole = req.user.role;
 
+        // --- 1. CONFIGURATION DE LA PAGINATION ---
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const offset = (page - 1) * limit;
+
         let whereCondition = {};
-        
-        // 1. Définition de la condition de base pour le Circuit et l'Agence
-        // On s'assure que l'agence est active pour tout le monde sauf potentiellement l'Admin
         let agencyWhere = { status: 'active', is_deleted: false };
         
-        // 2. FILTRAGE PAR RÔLE ET PROPRIÉTÉ
+        // --- 2. FILTRAGE PAR RÔLE ET PROPRIÉTÉ ---
         if (userRole !== 'Admin') {
-            // Vérifier si l'utilisateur appartient à une agence
             const userMembership = await UserAgency.findOne({
                 where: { user_id: userId }
             });
 
             if (userMembership) {
-                // C'est un membre du staff : il voit les trajets de SON agence
+                // Staff/Agency Owner: can see routes from THEIR agency
                 whereCondition['$circuit.agencyId$'] = userMembership.agency_id;
             } else {
-                // C'est un client/public : il ne voit que les trajets actifs et publics
+                // Public/Client: can only see scheduled or ongoing routes
                 whereCondition.status = { [Op.in]: ['scheduled', 'ongoing'] };
             }
         }
 
-        // 3. Filtre optionnel par statut (si passé en query params)
+        // Filter by status if provided in query
         if (status) {
             whereCondition.status = status;
         }
 
-        // 4. RÉCUPÉRATION DES DONNÉES
-        const routes = await Route.findAll({
+        // --- 3. RÉCUPÉRATION DES DONNÉES AVEC COMPTAGE ---
+        const { count, rows: routes } = await Route.findAndCountAll({
             where: whereCondition,
+            limit: limit,
+            offset: offset,
+            distinct: true, // Important pour un comptage correct avec des 'include'
             include: [
                 {
                     model: Circuit,
                     as: 'circuit',
-                    attributes: ['id', 'title', 'departureCity', 'destinationCity', 'agencyId'],
-                    required: true, // INNER JOIN pour garantir que le circuit existe
+                    attributes: ['id', 'title', 'departureCity', 'destinationCity', 'agencyId', 'image'],
+                    required: true, 
                     include: [{ 
                         model: Agency, 
                         as: 'agency', 
                         attributes: ['id', 'name', 'status'],
-                        where: agencyWhere // L'agence doit être active
+                        where: agencyWhere 
                     }]
                 },
                 {
@@ -201,9 +207,16 @@ exports.getRoutes = async (req, res) => {
             ]
         });
 
+        // --- 4. RÉPONSE STRUCTURÉE ---
         return res.status(200).json({
             status: 'success',
             results: routes.length,
+            total: count,
+            pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(count / limit),
+                limit: limit
+            },
             data: routes
         });
 
@@ -239,7 +252,18 @@ exports.getRouteById = async (req, res) => {
                         { 
                             model: Agency, 
                             as: 'agency', 
-                            attributes: ['id', 'name', 'description', 'total_booking', 'rating', 'status'] 
+                            attributes: ['id', 'name', 'description', 'total_booking', 'rating', 'status'] ,
+                            include: [
+                                {
+                                    model: AgencyFiles,
+                                    as: 'files', // Ensure this alias matches your associations
+                                    attributes: ['url'],
+                                    where: { 
+                                        type: 'MAIN_IMAGE'
+                                    },
+                                    required: false // Using false so we still get the agency even if it has no main image
+                                }
+                            ]
                         }
                     ]
                 },
@@ -776,6 +800,118 @@ exports.getRoutesByCircuit = async (req, res) => {
     } catch (error) {
         console.error("❌ Erreur getRoutesByCircuit:", error.message);
         res.status(500).json({ status: 'fail', message: "Erreur lors de la récupération des données." });
+    }
+};
+
+
+exports.searchRoutes = async (req, res) => {
+    try {
+        const { departureCityId, date, maxPrice, categoryId, page, limit } = req.query;
+        
+        // --- Pagination Setup ---
+        const pageNum = parseInt(page) || 1;
+        const limitNum = parseInt(limit) || 10;
+        const offset = (pageNum - 1) * limitNum;
+
+        const userId = req.user ? req.user.id : null;
+        const userGlobalRole = req.user ? req.user.role : 'USER'; 
+
+        let conditions = [];
+        let agencyWhere = { is_deleted: false };
+        let poiWhere = { isDeleted: false };
+
+        // --- 1. Permissions Logic ---
+        let isStaff = false;
+        if (userId && userGlobalRole !== 'Admin') {
+            const userActivities = await UserActivity.findAll({
+                where: { user_id: userId },
+                include: [{
+                    model: Activity,
+                    as: 'activity',
+                    where: { name: { [Op.in]: ["AGENCY_OWNER", "AGENCY_DRIVER", "AGENCY_GUIDE"] } }
+                }]
+            });
+            isStaff = userActivities.length > 0;
+        }
+
+        if (userGlobalRole === 'Admin') {
+            // Admin sees everything
+        } else if (isStaff) {
+            // Staff see their specific agency routes (even completed/canceled)
+            const userAgencies = await UserAgency.findAll({
+                where: { user_id: userId },
+                attributes: ['agency_id']
+            });
+            const agencyIds = userAgencies.map(ua => ua.agency_id);
+            agencyWhere.id = { [Op.in]: agencyIds };
+        } else {
+            // Regular users see only active agencies and scheduled/ongoing routes
+            agencyWhere.status = 'active';
+            conditions.push({ status: { [Op.in]: ['scheduled', 'ongoing'] } });
+        }
+
+        // --- 2. Search Filters ---
+        if (date) {
+            conditions.push(where(fn('LEFT', col('Route.date_start'), 10), '=', date));
+        }
+
+        if (maxPrice) {
+            conditions.push({ price: { [Op.lte]: parseFloat(maxPrice) } });
+        }
+
+        if (categoryId) {
+            poiWhere.category = categoryId;
+        }
+
+        // --- 3. Main Query with Pagination ---
+        const { count, rows } = await Route.findAndCountAll({
+            where: { [Op.and]: conditions },
+            distinct: true, // Ensures count is accurate with includes
+            limit: limitNum,
+            offset: offset,
+            include: [
+                {
+                    model: Circuit,
+                    as: 'circuit',
+                    required: true,
+                    where: { 
+                        isDeleted: false,
+                        ...(departureCityId && { departureCity: departureCityId })
+                    },
+                    include: [
+                        { 
+                            model: Agency, 
+                            as: 'agency', 
+                            required: true,
+                            where: agencyWhere 
+                        },
+                        {
+                            model: POI,
+                            as: 'pois',
+                            required: categoryId ? true : false, 
+                            where: poiWhere
+                        }
+                    ]
+                }
+            ],
+            order: [['date_start', 'ASC']],
+            logging: console.log 
+        });
+
+        // --- 4. Response ---
+        return res.status(200).json({
+            status: 'success',
+            results: rows.length,
+            totalResults: count,
+            totalPages: Math.ceil(count / limitNum),
+            currentPage: pageNum,
+            role_context: isStaff ? "STAFF" : userGlobalRole,
+            data: rows
+        });
+
+    } catch (error) {
+        console.error("❌ Error searchRoutes:", error.message);
+        res.status(500).json({ status: 'fail', message: error.message });
     }
 };
 

@@ -39,6 +39,10 @@ const Agency = sequelize.define(
             defaultValue: 'pending',
             allowNull: false,
         },
+        address_bureau: {
+            type: DataTypes.STRING,
+            allowNull: true,
+        },
         is_deleted: {
             type: DataTypes.BOOLEAN,
             defaultValue: false,

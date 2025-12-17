@@ -2,12 +2,14 @@ const express = require('express');
 const circuitController = require('../controllers/circuitController');
 const { authenticateToken } = require('../middleware/authEnhanced');
 const activityMiddleware = require('../middleware/activityMiddleware');
+const { uploadCircuitImage } = require("../config/cloudinary");
 const router = express.Router();
 
 
 router.route('/')
     .post(
         authenticateToken,
+        uploadCircuitImage.single('image'),
         activityMiddleware(['AGENCY_OWNER']),
         circuitController.createCircuit
     )
@@ -46,6 +48,7 @@ router.route('/:id')
     )
     .put(
         authenticateToken,
+        uploadCircuitImage.single('image'),
         activityMiddleware(['AGENCY_OWNER']),
         circuitController.updateCircuit
     )

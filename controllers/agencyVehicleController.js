@@ -110,15 +110,12 @@ exports.getAgencyVehicles = async (req, res) => {
     const filter = {}; 
 
     try {
-        // 💡 Log لتحديد الدور والـ ID
         console.log(`[AUTH CHECK] User ID: ${userId}, Role: ${userRole}, Agency ID: ${agencyId}`);
         
-        // 1. جلب نشاط المالك (مرة واحدة)
         const ownerActivity = await Activity.findOne({ 
             where: { name: AGENCY_OWNER_ACTIVITY_NAME } 
         });
 
-        // 2. جلب بيانات الوكالة مع العلاقات
         const agency = await Agency.findOne({
             where: { id: agencyId, is_deleted: false },
             attributes: { exclude: ['licence_id', 'is_deleted'] },
@@ -159,7 +156,6 @@ exports.getAgencyVehicles = async (req, res) => {
         
         console.log(`[AGENCY STATUS] Agency: ${agency.id}, Status: ${agency.status}`);
 
-        // 3. 🛡️ التحقق من صلاحيات الوصول (Authorization Check)
         let isAuthorized = true;
         
         if (agency.status !== 'active') {
@@ -167,12 +163,9 @@ exports.getAgencyVehicles = async (req, res) => {
             isAuthorized = (userRole === ADMIN_ROLE_NAME);
 
             if (!isAuthorized && userId) {
-                // إذا لم يكن مسؤولاً، تحقق مما إذا كان مالكًا للوكالة
                 
                 if (ownerActivity) {
-                    // 🛑 هذا هو المكان الذي نفترض فيه وجود الخطأ (فشل العثور على الارتباط)
                     const isOwnerOfThisAgency = await UserAgency.findOne({
-                        // تأكد من استخدام المفاتيح الخارجية الصحيحة: user_id و agency_id
                         where: { user_id: userId, agency_id: agencyId }, 
                         include: [{ 
                             model: User, 
@@ -180,7 +173,6 @@ exports.getAgencyVehicles = async (req, res) => {
                             include: [{ 
                                 model: UserActivity, 
                                 as: 'userActivities', 
-                                // تأكد من استخدام المفتاح الخارجي الصحيح: activity_id
                                 where: { activity_id: ownerActivity.id }, 
                                 required: true 
                             }] 
@@ -197,7 +189,6 @@ exports.getAgencyVehicles = async (req, res) => {
             }
         }
         
-        // 4. رفض الوصول إذا لم يتم التخويل
         if (!isAuthorized) {
             console.log(`[AUTH CHECK] Access denied for User ${userId}.`);
             return res.status(403).json({ 
@@ -218,7 +209,6 @@ exports.getAgencyVehicles = async (req, res) => {
             }
         }
         
-        // 5. جلب المركبات
         const whereClause = {
             agency_id: agencyId, 
             ...filter
@@ -234,7 +224,6 @@ exports.getAgencyVehicles = async (req, res) => {
 
         const agencyData = agency.get({ plain: true });
         
-        // 6. إرجاع الاستجابة
 
         if (vehicles.length === 0) {
             if (vehicleId) {

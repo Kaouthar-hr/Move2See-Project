@@ -46,6 +46,15 @@ const sequelize = db.getSequelize();
             allowNull: false,
             defaultValue: DataTypes.NOW
         },
+        image: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  imagePublicId: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    comment: 'Public ID de l\'image pour la suppression Cloudinary',
+  },
         isDeleted: {
             type: DataTypes.BOOLEAN,
             allowNull: false,

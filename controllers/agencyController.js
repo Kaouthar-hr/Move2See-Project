@@ -19,7 +19,14 @@ const AGENCY_STATUS_PENDING = 'pending';
 
 exports.createAgency = async (req, res) => {
     const userId = req.user?.userId || req.user?.id; 
-    const { name, description, licenceType } = req.body;
+    const { 
+        name,
+        description,
+        licenceType,
+        address_bureau,      
+        registration_number  
+    } = req.body;
+
     const uploadedFiles = req.files;
     const documentFile = uploadedFiles?.document;
 
@@ -29,6 +36,13 @@ exports.createAgency = async (req, res) => {
             message: "Utilisateur non authentifié." 
         });
     }
+
+    if (!registration_number) {
+    return res.status(400).json({ 
+        success: false, 
+        message: "Le numéro d'immatriculation est obligatoire." 
+    });
+}
 
     const t = await sequelize.transaction();
     let uploadedPublicIds = [];
@@ -47,6 +61,7 @@ exports.createAgency = async (req, res) => {
 
         // Création de la licence
         const newLicence = await Licence.create({
+            registration_number: registration_number,
             file_url: fileData.path || fileData.secure_url,
             cloudinary_id: fileData.filename,
             type: licenceType,
@@ -57,6 +72,7 @@ exports.createAgency = async (req, res) => {
         const newAgency = await Agency.create({
             name,
             description,
+            address_bureau: address_bureau,
             licence_id: newLicence.id, 
             status: AGENCY_STATUS_PENDING, 
             is_deleted: false,
@@ -593,7 +609,6 @@ exports.updateAgency = async (req, res) => {
             
             if (ownerActivity) {
                 const isOwnerOfThisAgency = await UserAgency.findOne({
-                    // ✅ تم التصحيح سابقاً: استخدام Snake Case
                     where: { user_id: userId, agency_id: agencyId }, 
                     include: [{
                         model: User,
@@ -628,23 +643,18 @@ exports.updateAgency = async (req, res) => {
 
         if (filesToDeleteArray.length > 0) {
             const files = await AgencyFiles.findAll({
-                // 🚨 التصحيح 1: استخدام public_id بدلاً من publicId في شرط where
-                where: { public_id: filesToDeleteArray, agency_id: agencyId }, // 🚨 استخدام agency_id إذا كان هذا هو المفتاح الخارجي
-                // 🚨 التصحيح 2: جلب public_id من قاعدة البيانات
+                where: { public_id: filesToDeleteArray, agency_id: agencyId }, 
                 attributes: ['public_id'], 
                 transaction: t
             });
             
             if (files.length > 0) {
-                // ملاحظة: يجب استخدام public_id عند الوصول إلى السجل المسترجع
                 const idsToDelete = files.map(f => f.public_id);
                 
                 await AgencyFiles.destroy({ 
-                    // 🚨 التصحيح 3: استخدام public_id في شرط Destroy
                     where: { public_id: idsToDelete, agency_id: agencyId }, 
                     transaction: t 
                 });
-                // 🚨 التصحيح 4: إضافة public_id إلى قائمة التنظيف
                 publicIdsToCleanUp.push(...idsToDelete); 
             }
         }
@@ -660,23 +670,18 @@ exports.updateAgency = async (req, res) => {
                     
                     if (fileType === 'MAIN_IMAGE' || fileType === 'MAIN_VIDEO' || fileType === 'DOCUMENT' || fileType === 'AUDIO' || fileType === 'VIRTUAL_TOUR') {
                         const oldFile = await AgencyFiles.findOne({ 
-                            // 🚨 التصحيح 5: استخدام agency_id في شرط FindOne
                             where: { agency_id: agencyId, type: fileType }, 
                             transaction: t 
                         });
                         if (oldFile) {
                             await oldFile.destroy({ transaction: t });
-                            // 🚨 التصحيح 6: التأكد من أن حقل publicId/public_id في oldFile صحيح
-                            // نفترض هنا أن Sequelize يحول `public_id` إلى `publicId` تلقائيًا في الكائن (Default behavior)
-                            // إذا لم يكن كذلك، يجب استخدام oldFile.public_id
                             publicIdsToCleanUp.push(oldFile.publicId || oldFile.public_id); 
                         }
                     }
                     
                     fileArray.forEach(file => {
-                         // 🚨 التصحيح 7: استخدام agency_id عند الإنشاء
                          filesToCreate.push({
-                             agency_id: agencyId, // 🚨 استخدام agency_id
+                             agency_id: agencyId, 
                              ...formatFileForUpdate(file, fileType)
                          });
                     });
@@ -688,7 +693,6 @@ exports.updateAgency = async (req, res) => {
             await AgencyFiles.bulkCreate(filesToCreate, { transaction: t });
         }
         
-        // 4. Agency and Licence Update Logic (Treated in the previous response - remain mostly correct)
         const dataToUpdate = { ...updateData };
         delete dataToUpdate.filesToDelete; 
 
@@ -811,7 +815,6 @@ exports.deleteAgency = async (req, res) => {
      });
      }
         
-        // 💡 التصحيح 1: جلب ownerActivity في البداية لضمان توفره
         const ownerActivity = await Activity.findOne({ 
             where: { name: AGENCY_OWNER_ACTIVITY_NAME },
             transaction: t
@@ -826,11 +829,9 @@ exports.deleteAgency = async (req, res) => {
      let isAuthorized = (userRole === ADMIN_ROLE_NAME);
 
      if (!isAuthorized) {
-            // 💡 ownerActivity تم جلبه بالفعل
      
      if (ownerActivity) {
     const isOwnerOfThisAgency = await UserAgency.findOne({
-     // 🚨 التصحيح 2: استخدام user_id و agency_id في UserAgency
      where: { user_id: userId, agency_id: agencyId }, 
      include: [{
      model: User,
@@ -860,15 +861,11 @@ exports.deleteAgency = async (req, res) => {
 
      // 3. Prepare Cloudinary Cleanup (Permanent File Deletion)
      const agencyFiles = await AgencyFiles.findAll({
-     // 🚨 التصحيح 3: استخدام agency_id إذا كان هذا هو المفتاح الخارجي في AgencyFiles
-            // (بناءً على مشكلة سابقة في ملفات الوكالة، نفترض أن المفتاح هو agency_id)
+     
      where: { agency_id: agencyId }, 
-     // 🚨 التصحيح 4: استخدام public_id بدلاً من publicId
      attributes: ['public_id'],
      transaction: t 
      });
-
-     // 🚨 التصحيح 5: استخدام public_id عند التعيين
      const publicIdsToCleanup = agencyFiles.map(file => file.public_id);
 
      // 4. Database Deletion/Update Operations
@@ -876,13 +873,11 @@ exports.deleteAgency = async (req, res) => {
      // A. Delete AgencyFiles entries (if cleanup is desired)
      if (publicIdsToCleanup.length > 0) {
      await AgencyFiles.destroy({ 
-     // 🚨 التصحيح 6: استخدام agency_id
      where: { agency_id: agencyId }, 
      transaction: t 
      });
      }
      
-     // B. Soft Delete the Agency (لا يوجد مفاتيح خارجية هنا)
      const [deletedRowsCount] = await Agency.update({ 
      is_deleted : true,
      status: 'deleted' 
@@ -896,7 +891,6 @@ exports.deleteAgency = async (req, res) => {
      return res.status(500).json({ success: false, message: "Échec de l’opération de suppression logique." });
      }
      
-     // C. Update Licence Status (لا يوجد مفاتيح خارجية هنا)
      if (agency.licence) {
      await Licence.update({ status: 'deleted' }, {
     where: { id: agency.licence_id },
@@ -904,8 +898,6 @@ exports.deleteAgency = async (req, res) => {
      });
      }
         
-        // 💡 ملاحظة: لم يتم تضمين إزالة الارتباطات في UserAgency، 
-        // يجب حذف جميع الارتباطات من جدول UserAgency للوكالة المحذوفة.
         await UserAgency.destroy({
             where: { agency_id: agencyId },
             transaction: t

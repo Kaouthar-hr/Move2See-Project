@@ -9,30 +9,48 @@ exports.createCircuit = async (req, res) => {
     
     try {
         const data = req.body;
-        const initialPois = data.pois || []; 
         const userId = req.user.userId;
         const userRole = req.user.role;
 
-        // 1. Validation des champs obligatoires
-        if (!data.title || !data.agencyId || !data.price) {
+        // 1. Handle POIs Parsing
+        // When using form-data for uploads, arrays often arrive as strings
+        let initialPois = [];
+        if (data.pois) {
+            try {
+                initialPois = typeof data.pois === 'string' ? JSON.parse(data.pois) : data.pois;
+            } catch (e) {
+                await transaction.rollback();
+                return res.status(400).json({ 
+                    status: 'fail', 
+                    message: 'Invalid format for POIs. Must be a valid JSON array.' 
+                });
+            }
+        }
+
+        // 2. Validation of mandatory fields and Image presence
+        if (!data.title || !data.agencyId || !data.price || !data.seats || !data.departureCity) {
             await transaction.rollback();
             return res.status(400).json({ 
                 status: 'fail', 
-                message: 'Le titre, l\'ID de l\'agence et le prix sont requis.' 
+                message: 'Title, Agency, Price, Seats, and Departure City are required.' 
             });
         }
 
-        // 2. Vérification de l'existence de l'agence, son statut et la propriété
+        if (!req.file) {
+            await transaction.rollback();
+            return res.status(400).json({ 
+                status: 'fail', 
+                message: 'Circuit image is required.' 
+            });
+        }
+
+        // 3. Agency existence and Authorization check
         const agencyQuery = {
-            where: { 
-                id: data.agencyId,
-                status: 'active', 
-                is_deleted: false 
-            },
+            where: { id: data.agencyId, status: 'active', is_deleted: false },
             transaction
         };
 
-        // Si l'utilisateur n'est pas Admin, on vérifie s'il appartient à cette agence
+        // If not Admin, check if user belongs to this agency
         if (userRole !== 'Admin') {
             agencyQuery.include = [{
                 model: UserAgency,
@@ -47,41 +65,46 @@ exports.createCircuit = async (req, res) => {
             await transaction.rollback();
             return res.status(403).json({ 
                 status: 'fail', 
-                message: "Accès refusé. L'agence est inactive, supprimée, ou vous n'avez pas les droits sur celle-ci." 
+                message: "Access denied. Agency is inactive or unauthorized." 
             });
         }
         
-        // 3. Validation des POIs (Points d'intérêt)
+        // 4. Validate POIs structure
         const invalidPois = initialPois.filter(p => !p.poiId || typeof p.order !== 'number');
         if (invalidPois.length > 0) {
             await transaction.rollback();
             return res.status(400).json({ 
                 status: 'fail', 
-                message: 'Chaque POI doit avoir un poiId valide et un order numérique.' 
+                message: 'Each POI must have a valid poiId and a numerical order.' 
             });
         }
 
-        // 4. Création du Circuit principal
-        const circuitDataToCreate = { ...data };
+        // 5. Create Circuit with Cloudinary Data
+        const circuitDataToCreate = { 
+            ...data, 
+            image: req.file.path,           // Cloudinary URL
+            imagePublicId: req.file.filename // Cloudinary Public ID for future deletion
+        };
+        
+        // Remove pois from main object as it belongs to the junction table
         delete circuitDataToCreate.pois; 
 
         const newCircuit = await Circuit.create(circuitDataToCreate, { transaction });
         
-        // 5. Création des relations Circuit-POI
+        // 6. Create Circuit-POI relations
         if (initialPois.length > 0) {
             const relations = initialPois.map(item => ({
                 circuitId: newCircuit.id,
                 poiId: item.poiId,
                 order: item.order
             }));
-
             await CircuitPOIs.bulkCreate(relations, { transaction });
         }
         
-        // 6. Validation de la transaction
+        // Commit Transaction
         await transaction.commit();
 
-        // 7. Récupération du résultat final pour la réponse
+        // 7. Fetch final result with associations for response
         const createdCircuitWithPois = await Circuit.findByPk(newCircuit.id, {
             include: [{ 
                 model: POI, 
@@ -94,29 +117,17 @@ exports.createCircuit = async (req, res) => {
 
         return res.status(201).json({ 
             status: 'success', 
-            message: 'Circuit créé avec succès.',
+            message: 'Circuit created successfully.',
             data: createdCircuitWithPois 
         });
 
     } catch (error) {
         if (transaction) await transaction.rollback(); 
+        console.error("❌ createCircuit Error:", error.message);
         
-        console.error("❌ Erreur createCircuit:", error.message);
-        
-        let userMessage = 'Erreur serveur lors de la création du circuit.';
-        
-        // Gestion des erreurs spécifiques de Sequelize
-        if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = "Erreur d'intégrité : L'ID d'agence ou de POI fourni est invalide.";
-        } else if (error.name === 'SequelizeValidationError') {
-             userMessage = 'Erreur de validation : ' + error.errors.map(e => e.message).join(', ');
-        } else if (error.message.includes('alias')) {
-             userMessage = "Erreur de configuration du serveur : Alias de relation incorrect.";
-        }
-
         return res.status(500).json({ 
             status: 'fail', 
-            message: userMessage,
+            message: 'Server error during circuit creation.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
@@ -251,103 +262,114 @@ exports.getCircuitById = async (req, res) => {
 exports.updateCircuit = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
-    const initialPois = data.pois;
     const userId = req.user.userId;
     const userRole = req.user.role;
 
     const transaction = await Circuit.sequelize.transaction();
 
     try {
-        // 1. VÉRIFICATION DE SÉCURITÉ ET PROPRIÉTÉ
-        // On cherche le circuit, son agence (active) et si l'utilisateur y est lié
-        const existingCircuitConditions = {
+        // 1. SECURITY & OWNERSHIP CHECK
+        const existingCircuit = await Circuit.findOne({
             where: { id: id, isDeleted: false },
-            include: [
-                {
-                    model: Agency,
-                    as: 'agency',
-                    where: { 
-                        status: 'active', 
-                        is_deleted: false 
-                    },
-                    // Si l'utilisateur n'est pas Admin, on force la vérification de propriété
-                    include: userRole !== 'Admin' ? [{
-                        model: UserAgency,
-                        as: 'userAgencies', 
-                        where: { user_id: userId }
-                    }] : []
-                }
-            ],
+            include: [{
+                model: Agency,
+                as: 'agency',
+                where: { status: 'active', is_deleted: false },
+                include: userRole !== 'Admin' ? [{
+                    model: UserAgency,
+                    as: 'userAgencies',
+                    where: { user_id: userId }
+                }] : []
+            }],
             transaction
-        };
-
-        const existingCircuit = await Circuit.findOne(existingCircuitConditions);
+        });
 
         if (!existingCircuit) {
             await transaction.rollback();
-            return res.status(403).json({ 
+            return res.status(403).json({
                 status: 'fail',
-                message: "Modification impossible : circuit inexistant, agence inactive ou vous n'avez pas les droits nécessaires." 
+                message: "Update impossible: circuit not found, inactive agency, or unauthorized access."
             });
         }
 
-        // 2. Préparation des données (on exclut 'pois' de la mise à jour directe du modèle Circuit)
+        // 2. DATA PREPARATION
         const circuitDataToUpdate = { ...data };
-        delete circuitDataToUpdate.pois; 
-        delete circuitDataToUpdate.agencyId; // Sécurité : on ne change pas l'agence d'un circuit existant
+        
+        // Safety: Do not change agency or ID directly
+        delete circuitDataToUpdate.agencyId;
+        delete circuitDataToUpdate.id;
 
-        // 3. Mise à jour du Circuit principal
+        // Parse POIs if sent via form-data
+        let initialPois = data.pois;
+        if (initialPois && typeof initialPois === 'string') {
+            try {
+                initialPois = JSON.parse(initialPois);
+            } catch (e) {
+                await transaction.rollback();
+                return res.status(400).json({ status: 'fail', message: 'Invalid POIs format.' });
+            }
+        }
+        delete circuitDataToUpdate.pois;
+
+        // 3. IMAGE UPDATE LOGIC (Cloudinary)
+        if (req.file) {
+            // If there's an old image, delete it from Cloudinary
+            if (existingCircuit.imagePublicId) {
+                try {
+                    await cloudinary.uploader.destroy(existingCircuit.imagePublicId);
+                } catch (err) {
+                    console.error("Old image deletion failed:", err.message);
+                }
+            }
+            // Set new image data
+            circuitDataToUpdate.image = req.file.path;
+            circuitDataToUpdate.imagePublicId = req.file.filename;
+        }
+
+        // 4. UPDATE MAIN CIRCUIT
         await Circuit.update(circuitDataToUpdate, {
-            where: { id: id, isDeleted: false },
-            transaction 
+            where: { id: id },
+            transaction
         });
 
-        // 4. Gestion des POI associés (si le champ 'pois' est fourni)
+        // 5. UPDATE POIs (If provided)
         if (initialPois !== undefined) {
             if (!Array.isArray(initialPois)) {
                 await transaction.rollback();
-                return res.status(400).json({
-                    status: 'fail',
-                    message: 'Le champ "pois" doit être un tableau.' 
-                });
+                return res.status(400).json({ status: 'fail', message: 'POIs must be an array.' });
             }
 
-            // A. Supprimer les anciennes associations
+            // A. Remove old associations
             await CircuitPOIs.destroy({ where: { circuitId: id }, transaction });
 
-            // B. Créer les nouvelles associations
+            // B. Create new associations
             if (initialPois.length > 0) {
-                // Validation rapide de la structure des données reçues
                 const relations = initialPois.map(item => ({
                     circuitId: id,
                     poiId: item.poiId,
                     order: item.order
                 }));
-                
+
                 const invalidPois = relations.filter(r => !r.poiId || typeof r.order !== 'number');
                 if (invalidPois.length > 0) {
                     await transaction.rollback();
-                    return res.status(400).json({ 
-                        status: 'fail', 
-                        message: 'Chaque POI doit avoir un poiId (UUID) et un order (nombre).' 
+                    return res.status(400).json({
+                        status: 'fail',
+                        message: 'Every POI requires a valid poiId and numerical order.'
                     });
                 }
 
                 await CircuitPOIs.bulkCreate(relations, { transaction });
             }
         }
-        
-        // 5. Validation de la transaction
+
+        // 6. FINALIZE
         await transaction.commit();
 
-        // 6. Récupération du circuit mis à jour pour la réponse
+        // 7. FETCH UPDATED RESULT
         const updatedCircuit = await Circuit.findByPk(id, {
             include: [
-                { 
-                    model: Agency,
-                    as: 'agency',
-                    attributes: ['id', 'name', 'status']
-                },
+                { model: Agency, as: 'agency', attributes: ['id', 'name', 'status'] },
                 { 
                     model: POI, 
                     as: 'pois', 
@@ -356,34 +378,21 @@ exports.updateCircuit = async (req, res) => {
                     required: false 
                 }
             ],
-            order: [
-                [{ model: POI, as: 'pois' }, CircuitPOIs, 'order', 'ASC'] 
-            ]
+            order: [[{ model: POI, as: 'pois' }, CircuitPOIs, 'order', 'ASC']]
         });
 
-        return res.status(200).json({ 
-            status: 'success', 
-            message: 'Circuit mis à jour avec succès.',
-            data: updatedCircuit 
+        return res.status(200).json({
+            status: 'success',
+            message: 'Circuit updated successfully.',
+            data: updatedCircuit
         });
 
     } catch (error) {
-        if (transaction) await transaction.rollback(); 
-        
-        console.error("❌ Erreur updateCircuit :", error.message);
-        
-        let userMessage = 'Erreur serveur lors de la mise à jour du circuit.';
-        if (error.name === 'SequelizeForeignKeyConstraintError') {
-             userMessage = "Erreur d'intégrité : L'un des POI fournis n'existe pas dans la base de données.";
-        } else if (error.name === 'SequelizeValidationError') {
-             userMessage = 'Erreur de validation : ' + error.errors.map(e => e.message).join(', ');
-        } else if (error.message.includes('alias')) {
-             userMessage = "Erreur de configuration : l'alias des relations est incorrect.";
-        }
-
-        return res.status(500).json({ 
-            status: 'fail', 
-            message: userMessage,
+        if (transaction) await transaction.rollback();
+        console.error("❌ Update Error:", error.message);
+        return res.status(500).json({
+            status: 'fail',
+            message: 'Server error during update.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
@@ -398,7 +407,7 @@ exports.deleteCircuit = async (req, res) => {
     const userRole = req.user.role;
     
     try {
-        // 1. Recherche du circuit avec vérification d'agence et de propriété
+        // 1. Find circuit with ownership and agency status verification
         const circuitQuery = {
             where: { id: id },
             include: [{
@@ -408,7 +417,7 @@ exports.deleteCircuit = async (req, res) => {
                     status: 'active', 
                     is_deleted: false 
                 },
-                // Si l'utilisateur n'est pas Admin, on vérifie s'il possède cette agence
+                // Ownership check for non-admin users
                 include: userRole !== 'Admin' ? [{
                     model: UserAgency,
                     as: 'userAgencies', 
@@ -419,70 +428,64 @@ exports.deleteCircuit = async (req, res) => {
 
         const circuit = await Circuit.findOne(circuitQuery);
 
-        // Si le circuit n'existe pas ou si l'utilisateur n'a pas les droits
+        // Access denied or not found
         if (!circuit) {
             return res.status(404).json({ 
                 status: 'fail', 
-                message: "Impossible de supprimer. Circuit non trouvé, agence inactive ou droits insuffisants." 
+                message: "Deletion impossible. Circuit not found, agency inactive, or insufficient permissions." 
             });
         }
         
-        // 2. Vérification si déjà supprimé
+        // 2. Check if already deleted
         if (circuit.isDeleted) {
             return res.status(410).json({ 
                 status: 'fail', 
-                message: 'Ce circuit est déjà marqué comme supprimé.' 
+                message: 'This circuit has already been deleted.' 
             });
         }
+
+        // 3. Optional: Add check for active bookings here before proceeding
         
-        // 3. Vérification de Contrainte (Futur modèle Booking)
-        /*
-        const activeBookingsCount = await Booking.count({
-            where: {
-                circuitId: id,
-                status: ['pending', 'confirmed', 'paid']
+        // 4. Cloudinary Cleanup (Permanent deletion of the image asset)
+        if (circuit.imagePublicId) {
+            try {
+                await cloudinary.uploader.destroy(circuit.imagePublicId);
+                console.log(`✅ Cloudinary asset deleted: ${circuit.imagePublicId}`);
+            } catch (cloudErr) {
+                // We log the error but don't stop the DB update 
+                console.error("⚠️ Cloudinary image deletion failed:", cloudErr.message);
             }
-        });
-
-        if (activeBookingsCount > 0) {
-            return res.status(409).json({
-                status: 'fail',
-                message: `Impossible de supprimer : ${activeBookingsCount} réservation(s) active(s) en cours.`
-            });
         }
-        */
 
-        // 4. Effectuer la Suppression Logique
+        // 5. Perform Soft Delete in Database
+        // We clear image fields because the files no longer exist on Cloudinary
         const [updatedRows] = await Circuit.update({ 
-            isDeleted: true 
+            isDeleted: true,
+            image: null,
+            imagePublicId: null
         }, {
             where: { id: id }
         });
         
-        // 5. Réponse
+        // 6. Response
         if (updatedRows > 0) {
             return res.status(200).json({ 
                 status: 'success', 
-                message: `Le circuit a été supprimé avec succès.` 
+                message: 'Circuit successfully deleted and image storage cleared.' 
             });
         }
 
         return res.status(400).json({ 
             status: 'fail',
-            message: 'La mise à jour de suppression a échoué.' 
+            message: 'Failed to update deletion status.' 
         });
 
     } catch (error) {
-        console.error("❌ Erreur deleteCircuit:", error.message);
+        console.error("❌ deleteCircuit Error:", error.message);
         
-        let userMessage = 'Erreur serveur lors de la suppression du circuit.';
-        if (error.message.includes('alias')) {
-            userMessage = "Erreur de configuration : l'alias des relations est incorrect.";
-        }
-
         return res.status(500).json({ 
             status: 'fail',
-            message: userMessage,
+            message: 'Server error during circuit deletion.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
